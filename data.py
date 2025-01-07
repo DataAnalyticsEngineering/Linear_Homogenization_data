@@ -195,12 +195,12 @@ class Dataset3DMechanical(Dataset):
 
                 # Load tangent (6x6)
                 tangent_path = f"/{self.group}/dset_{i}/image/{hash_str}/load0/time_step0/homogenized_tangent"
-                if tangent_path not in f:
-                    raise KeyError(f"Homogenized tangent not found at {tangent_path}")
+                # if tangent_path not in f:
+                #     raise KeyError(f"Homogenized tangent not found at {tangent_path}")
 
                 C_np = f[tangent_path][...]
-                if C_np.shape != (6,6):
-                    raise ValueError(f"Expected 6x6 tangent, got {C_np.shape}")
+                # if C_np.shape != (6,6):
+                #     raise ValueError(f"Expected 6x6 tangent, got {C_np.shape}")
 
                 C_t = torch.tensor(C_np, dtype=self.dtype)
                 C_list.append(C_t)
