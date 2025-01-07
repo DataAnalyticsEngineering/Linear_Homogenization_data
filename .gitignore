@@ -1,0 +1,93 @@
+# macOS-specific files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# macOS Finder attributes
+Icon?
+._*
+
+# macOS resource forks and Spotlight files
+.Spotlight-V100
+.Trashes
+.VolumeIcon.icns
+._*
+
+# VS Code-specific files
+.vscode/
+*.code-workspace
+
+# Python-specific files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment and dependency files
+.env
+.venv/
+env/
+venv/
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Byte-compiled or compiled Python files
+*.pyc
+*.pyo
+*.pyd
+
+# Distribution/build directories
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Python virtual environment tools
+.poetry/
+poetry.lock
+Pipfile
+Pipfile.lock
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# pytest cache
+.pytest_cache/
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+
+# Logs and other artifacts
+*.log
+*.tmp
+*.swp
+*.swo
+*.~lock.*
+
+# Backup files
+*.bak
+*~.nib
+*.~lock.*
+*.gz
+*.zip
+*.tar
+*.rar
+
+# IDE-specific files
+.idea/
+*.iml
+
+# Temporary and miscellaneous files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Project-specific files
+*.h5
+data/
