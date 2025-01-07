@@ -1,7 +1,6 @@
 """
 PyTorch data loading
 """
-from typing import Optional
 
 import torch
 import numpy as np
@@ -12,17 +11,41 @@ import os
 import random
 
 class Dataset3DThermal(Dataset):
-    def __init__(self, file_name, R_range, group, feature_idx=None):
-        self.file_name = file_name
-        self.R_range = R_range
+    def __init__(
+        self, 
+        h5_file_path: str, 
+        group: str, 
+        R_range, 
+        feature_vector_name: str = 'feature_vector', 
+        device = 'cpu', 
+        dtype = torch.float32, 
+        feature_idx = None
+    ):
+        """
+        A PyTorch Dataset for 3D thermal microstructure data.
+
+        Args:
+            h5_file_path (str): Path to the HDF5 file with data.
+            group (str): One of 'structures_train', 'structures_val', or 'structures_test'.
+            R_range (iterable): Range of contrast values R to append to each sample.
+            feature_vector_name (str): Name of the feature vector dataset in the HDF5.
+            device (str or torch.device): Device to place the final tensors on.
+            dtype (torch.dtype): Data type for the final tensors.
+            feature_idx (None or sequence): Indices of features to keep. If None, keep all.
+        """
+        self.h5_file_path = h5_file_path
         self.group = group
+        self.R_range = R_range
+        self.feature_vector_name = feature_vector_name
+        self.device = device
+        self.dtype = dtype
 
         if feature_idx is None:
             feature_idx = slice(None)
-
         self.feature_idx = feature_idx
+
         self.features, self.kappa = self.load_data()
-    
+
     def __len__(self):
         return len(self.features)
 
@@ -30,65 +53,63 @@ class Dataset3DThermal(Dataset):
         return self.features[idx], self.kappa[idx]
 
     def load_data(self):
-        features_list = []
-        kappa_list = []
+        """Loads data from HDF5, returns (features, kappa) as torch tensors."""
+        if not os.path.exists(self.h5_file_path):
+            raise FileNotFoundError(f"HDF5 file not found: {self.h5_file_path}")
 
-        with h5py.File(self.file_name, "r") as F:
-            feature_vectors = torch.tensor(F[f"{self.group}/feature_vector"][...], dtype=torch.float32)
-
-            # Truncate feature vector
-            feature_vectors = feature_vectors[..., self.feature_idx]
+        with h5py.File(self.h5_file_path, "r") as f:
+            # Load and truncate feature vectors
+            features = f[f"{self.group}/{self.feature_vector_name}"][...][:, self.feature_idx]
             
-            # This is hacky, but we only want to use a subset of the data for validation
-            if self.group == 'structures_val':
-                feature_vectors = feature_vectors[:2000]
-
-            num_samples = feature_vectors.shape[0]
-
-            for R in self.R_range:
-                R_column = torch.ones((num_samples, 1)) * R
-                onebyR_column = torch.ones((num_samples, 1)) / R
-                features_with_R = torch.hstack((feature_vectors, onebyR_column, R_column))
-                features_list.append(features_with_R)
-
-                if R < 1:  # For fractional R, the corresponding kappa is stored as contrast_{R_value}_inv
-                    R_key = int(round(1 / R))
-                    kappa_grp = torch.tensor(F[f"{self.group}/effective_conductivity/contrast_invR_{R_key}"][...], dtype=torch.float32)
+            # !!!!! This is a hacky fix to reduce the number of samples for validation and test sets !!!!!!
+            if self.group in ['structures_val', 'structures_test']:
+                features = features[:2000]
+            
+            num_samples = len(features)
+            feature_dim = features.shape[1] + 2  # +2 for R and 1/R columns
+            
+            # Pre-allocate arrays
+            all_features = np.empty((num_samples * len(self.R_range), feature_dim), dtype=np.float32)
+            all_kappa = np.empty((num_samples * len(self.R_range), 6), dtype=np.float32)
+            
+            # Fill arrays
+            for i, R in enumerate(self.R_range):
+                idx = slice(i*num_samples, (i+1)*num_samples)
+                
+                # Set features with R columns
+                all_features[idx] = np.column_stack([features, np.full(num_samples, 1/R), np.full(num_samples, R)])
+                
+                # Set kappa values
+                if R < 1:
+                    R_key = int(round(1/R))
+                    kappa = f[f"{self.group}/effective_conductivity/contrast_invR_{R_key}"][...]
                 elif R > 1:
                     R_key = int(round(R))
-                    kappa_grp = torch.tensor(F[f"{self.group}/effective_conductivity/contrast_R_{R_key}"][...], dtype=torch.float32)
+                    kappa = f[f"{self.group}/effective_conductivity/contrast_R_{R_key}"][...]
                 else:
-                    kappa_grp = torch.ones((num_samples, 6))
-                    kappa_grp[..., 3:] = 0.
-                kappa_list.append(kappa_grp)
+                    kappa = np.ones((num_samples, 6), dtype=np.float32)
+                    kappa[:, 3:] = 0
+                    
+                all_kappa[idx] = kappa
 
-        # Concatenate all features and kappa arrays vertically
-        all_features = torch.vstack(features_list)
-        # Make the 0th feature -> 1 - 0th feature
-        # 0th feature is the porosity (volume fraction of phase 0) - we want the volume fraction of phase 1
-        all_features[:, 0] = 1.0 - all_features[:, 0]
-        all_kappa = torch.vstack(kappa_list)
-        # Scale components from dimension 2 onwards
-        all_kappa[:, 3:] = all_kappa[:, 3:] / np.sqrt(2.0)
+        all_features[:, 0] = 1.0 - all_features[:, 0]  # Invert volume fraction of phase 0 to get phase 1
+        all_kappa[:, 3:] /= np.sqrt(2.0)  # Scale off-diagonal terms
 
-        # Convert to PyTorch tensors
-        features_tensor = all_features
-        kappa_tensor = all_kappa
-        
-        #Check all values are finite
-        if not torch.all(torch.isfinite(features_tensor)):
-            raise ValueError("Invalid features_tensor: contains non-finite values in group {}".format(self.group))
-        if not torch.all(torch.isfinite(kappa_tensor)):
-            raise ValueError("Invalid kappa_tensor: contains non-finite values in group {}".format(self.group))
+        # Convert to torch tensors
+        features_tensor = torch.from_numpy(all_features).to(device=self.device, dtype=self.dtype)
+        kappa_tensor = torch.from_numpy(all_kappa).to(device=self.device, dtype=self.dtype)
+
+        if not (torch.isfinite(features_tensor).all() and torch.isfinite(kappa_tensor).all()):
+            raise ValueError(f"Non-finite values found in tensors for group {self.group}")
 
         return features_tensor, kappa_tensor
 
 class Dataset3DMechanical(Dataset):
     def __init__(self, 
-                 csv_file_path, 
-                 h5_file_path, 
-                 group,
-                 num_samples, 
+                 csv_file_path: str, 
+                 h5_file_path: str, 
+                 group: str,
+                 num_samples: int, 
                  feature_vector_name='feature_vector', 
                  random_seed=42,
                  device='cpu',
@@ -151,19 +172,18 @@ class Dataset3DMechanical(Dataset):
         if not os.path.exists(self.csv_file_path):
             raise FileNotFoundError(f"CSV file not found: {self.csv_file_path}")
 
+        target_name = self.group.replace('structures_', '')
+        required_fields = ['dataset_index', 'alpha', 'beta', 'gamma', 'hash']
+        entries = []
         with open(self.csv_file_path, 'r', newline='') as csvfile:
             reader = csv.DictReader(csvfile)
-            return [
-                {
-                    'dataset_index': int(row['dataset_index']),
-                    'alpha': float(row['alpha']),
-                    'beta': float(row['beta']),
-                    'gamma': float(row['gamma']),
-                    'hash': row['hash']
-                }
-                for row in reader
-                if row['dataset_name'] == self.group.replace('structures_', '')
-            ]
+            for row in reader:
+                if row['dataset_name'] == target_name:
+                    entries.append({
+                        field: (int if field == 'dataset_index' else float if field != 'hash' else str)(row[field])
+                        for field in required_fields
+                    })
+        return entries
 
     def _load_data(self):
         if not os.path.exists(self.h5_file_path):
@@ -173,45 +193,36 @@ class Dataset3DMechanical(Dataset):
             feature_vector_path = f"/{self.group}/{self.feature_vector_name}"
             if feature_vector_path not in f:
                 raise KeyError(f"Feature vector dataset not found at {feature_vector_path}")
-
-            feature_vectors = f[feature_vector_path]
             
-            features_list = []
-            C_list = []
+            feature_vectors = f[feature_vector_path]
+            # Truncate feature vector
+            feature_vectors = feature_vectors[..., self.feature_idx]
 
-            # First, just load and store all data in lists
-            for entry in self.sampled_entries:
+            n_samples = len(self.sampled_entries)
+            n_features = feature_vectors.shape[1] + 6  # original features + 6 additional
+            features_np = np.empty((n_samples, n_features), dtype=np.float32)
+            tangents_np = np.empty((n_samples, 6, 6), dtype=np.float32)
+
+            for idx, entry in enumerate(self.sampled_entries):
                 i = entry['dataset_index']
                 alpha, beta, gamma = entry['alpha'], entry['beta'], entry['gamma']
                 hash_str = entry['hash']
-
-                # Load and slice features
-                feat = torch.tensor(feature_vectors[i, :], dtype=self.dtype)[self.feature_idx]
-
-                # Append parameters
-                appended = torch.tensor([1/alpha, 1/beta, 1/gamma, alpha, beta, gamma], dtype=self.dtype)
-                final_feat = torch.cat([feat, appended])
-                features_list.append(final_feat)
-
-                # Load tangent (6x6)
+                
+                features_np[idx] = np.concatenate([
+                    feature_vectors[i,:],
+                    [1/alpha, 1/beta, 1/gamma, alpha, beta, gamma]
+                ])
+                                
                 tangent_path = f"/{self.group}/dset_{i}/image/{hash_str}/load0/time_step0/homogenized_tangent"
-                # if tangent_path not in f:
-                #     raise KeyError(f"Homogenized tangent not found at {tangent_path}")
+                tangents_np[idx] = f[tangent_path][...]
 
-                C_np = f[tangent_path][...]
-                # if C_np.shape != (6,6):
-                #     raise ValueError(f"Expected 6x6 tangent, got {C_np.shape}")
+            # Invert volume fraction of phase 0 to get volume fraction of phase 1
+            features_np[:, 0] = 1.0 - features_np[:, 0]
 
-                C_t = torch.tensor(C_np, dtype=self.dtype)
-                C_list.append(C_t)
-
-            # Now stack all features and tangents
-            self.all_features = torch.stack(features_list, dim=0).to(self.device)   # (N, selected_features+6)
-            self.all_features[:, 0] = 1.0 - self.all_features[:, 0]                 # Invert the volume fraction    
-            C_all_6x6 = torch.stack(C_list, dim=0).to(self.device)                  # (N, 6, 6)
-
-            # Convert all tangents at once
-            self.all_C = C6x6_to_C21(C_all_6x6)  # (N,21)
+        # Convert to torch tensors
+        self.all_features = torch.from_numpy(features_np).to(dtype=self.dtype, device=self.device)
+        C_all_6x6 = torch.from_numpy(tangents_np).to(dtype=self.dtype, device=self.device)
+        self.all_C = C6x6_to_C21(C_all_6x6)
 
     def __len__(self):
         return self.num_samples
