@@ -17,21 +17,28 @@ class Dataset3DThermal(Dataset):
         group: str, 
         R_range, 
         feature_vector_name: str = 'feature_vector', 
-        device = 'cpu', 
-        dtype = torch.float64, 
-        feature_idx = None
+        device='cpu', 
+        dtype=torch.float64, 
+        feature_idx=None,
+        max_samples=None
     ):
         """
         A PyTorch Dataset for 3D thermal microstructure data.
 
         Args:
             h5_file_path (str): Path to the HDF5 file with data.
-            group (str): One of 'structures_train', 'structures_val', or 'structures_test'.
+            group (str): One of 'structures_train', 'structures_val', 'structures_test'.
             R_range (iterable): Range of contrast values R to append to each sample.
-            feature_vector_name (str): Name of the feature vector dataset in the HDF5.
-            device (str or torch.device): Device to place the final tensors on.
-            dtype (torch.dtype): Data type for the final tensors.
+            feature_vector_name (str): Name of the feature vector dataset in HDF5.
+            device (str or torch.device): Device for final tensors ('cpu', 'cuda', etc.).
+            dtype (torch.dtype): Data type of final tensors (e.g., torch.float64).
             feature_idx (None or sequence): Indices of features to keep. If None, keep all.
+            max_samples (int or None): If set, limit the dataset to the first 'max_samples'.
+
+        Raises:
+            FileNotFoundError: If the HDF5 file is missing.
+            KeyError: If feature_vector_name is not found in HDF5.
+            ValueError: If the required kappa dataset for R is missing, or non-finite values occur.
         """
         self.h5_file_path = h5_file_path
         self.group = group
@@ -39,12 +46,10 @@ class Dataset3DThermal(Dataset):
         self.feature_vector_name = feature_vector_name
         self.device = device
         self.dtype = dtype
+        self.feature_idx = slice(None) if (feature_idx is None) else feature_idx
+        self.max_samples = max_samples
 
-        if feature_idx is None:
-            feature_idx = slice(None)
-        self.feature_idx = feature_idx
-
-        self.features, self.kappa = self.load_data()
+        self.features, self.kappa = self._load_data()
 
     def __len__(self):
         return len(self.features)
@@ -52,57 +57,81 @@ class Dataset3DThermal(Dataset):
     def __getitem__(self, idx):
         return self.features[idx], self.kappa[idx]
 
-    def load_data(self):
-        """Loads data from HDF5, returns (features, kappa) as torch tensors."""
+    def _load_data(self):
+        """Load features and kappa from HDF5, expand them for each R, and return torch Tensors."""
         if not os.path.exists(self.h5_file_path):
             raise FileNotFoundError(f"HDF5 file not found: {self.h5_file_path}")
 
         with h5py.File(self.h5_file_path, "r") as f:
-            # Load and truncate feature vectors
-            features = f[f"{self.group}/{self.feature_vector_name}"][...][:, self.feature_idx]
+            # Load base feature vectors
+            feature_path = f"{self.group}/{self.feature_vector_name}"
+            if feature_path not in f:
+                raise KeyError(f"Feature vector dataset not found at {feature_path}")
             
-            # !!!!! This is a hacky fix to reduce the number of samples for validation and test sets !!!!!!
-            if self.group in ['structures_val', 'structures_test']:
-                features = features[:2000]
+            base_features = f[feature_path][...]
+            # Truncate feature vector
+            base_features = base_features[..., self.feature_idx]
             
-            num_samples = len(features)
-            feature_dim = features.shape[1] + 2  # +2 for R and 1/R columns
-            
-            # Pre-allocate arrays
-            all_features = np.empty((num_samples * len(self.R_range), feature_dim), dtype=np.float64)
-            all_kappa = np.empty((num_samples * len(self.R_range), 6), dtype=np.float64)
-            
-            # Fill arrays
+            # Optionally limit the dataset size (max_samples)
+            if self.max_samples is not None:
+                base_features = base_features[: self.max_samples]
+
+            num_samples = base_features.shape[0]
+            feature_dim = base_features.shape[1] + 2
+            total_count = num_samples * len(self.R_range)
+
+            all_features_np = np.empty((total_count, feature_dim), dtype=np.float64)
+            all_kappa_np = np.empty((total_count, 6), dtype=np.float64)
+
+            # For each R, copy base_features + columns [1/R, R], load the matching kappa
             for i, R in enumerate(self.R_range):
-                idx = slice(i*num_samples, (i+1)*num_samples)
-                
-                # Set features with R columns
-                all_features[idx] = np.column_stack([features, np.full(num_samples, 1/R), np.full(num_samples, R)])
-                
-                # Set kappa values
-                if R < 1:
-                    R_key = int(round(1/R))
-                    kappa = f[f"{self.group}/effective_conductivity/contrast_invR_{R_key}"][...]
-                elif R > 1:
-                    R_key = int(round(R))
-                    kappa = f[f"{self.group}/effective_conductivity/contrast_R_{R_key}"][...]
-                else:
-                    kappa = np.ones((num_samples, 6), dtype=np.float64)
-                    kappa[:, 3:] = 0
-                    
-                all_kappa[idx] = kappa
+                start = i * num_samples
+                end = (i + 1) * num_samples
 
-        all_features[:, 0] = 1.0 - all_features[:, 0]  # Invert volume fraction of phase 0 to get phase 1
-        all_kappa[:, 3:] /= np.sqrt(2.0)  # Scale off-diagonal terms
+                # Build final features for this R
+                all_features_np[start:end, :-2] = base_features
+                all_features_np[start:end, -2] = 1.0 / R
+                all_features_np[start:end, -1] = R
 
-        # Convert to torch tensors
-        features_tensor = torch.from_numpy(all_features).to(device=self.device, dtype=self.dtype)
-        kappa_tensor = torch.from_numpy(all_kappa).to(device=self.device, dtype=self.dtype)
+                # Load kappa
+                try:
+                    if R < 1:
+                        R_key = int(round(1.0 / R))
+                        kappa_data = f[f"{self.group}/effective_conductivity/contrast_invR_{R_key}"][...]
+                    elif R > 1:
+                        R_key = int(round(R))
+                        kappa_data = f[f"{self.group}/effective_conductivity/contrast_R_{R_key}"][...]
+                    else:
+                        # R == 1
+                        kappa_data = np.ones((num_samples, 6), dtype=np.float64)
+                        kappa_data[:, 3:] = 0.0
+                except KeyError:
+                    raise ValueError(
+                        f"No valid kappa dataset found for R={R} in group '{self.group}'. "
+                        f"Looked for 'contrast_invR_{R_key}' or 'contrast_R_{R_key}'"
+                    )
 
-        if not (torch.isfinite(features_tensor).all() and torch.isfinite(kappa_tensor).all()):
-            raise ValueError(f"Non-finite values found in tensors for group {self.group}")
+                # Possibly limit kappa_data to max_samples if it is large
+                if self.max_samples is not None:
+                    kappa_data = kappa_data[:self.max_samples]
 
-        return features_tensor, kappa_tensor
+                if kappa_data.shape != (num_samples, 6):
+                    raise ValueError(
+                        f"Expected kappa shape ({num_samples}, 6) for R={R}, got {kappa_data.shape}"
+                    )
+
+                all_kappa_np[start:end] = kappa_data
+
+        # Invert volume fraction of phase 0 to get volume fraction of phase 1
+        all_features_np[:, 0] = 1.0 - all_features_np[:, 0]
+
+        # Scale kappa columns 3..5 by 1/sqrt(2)
+        all_kappa_np[:, 3:] /= np.sqrt(2.0)        
+
+        features_t = torch.from_numpy(all_features_np).to(dtype=self.dtype, device=self.device)
+        kappa_t = torch.from_numpy(all_kappa_np).to(dtype=self.dtype, device=self.device)
+
+        return features_t, kappa_t
 
 class Dataset3DMechanical(Dataset):
     def __init__(self, 
