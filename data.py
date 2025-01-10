@@ -18,7 +18,7 @@ class Dataset3DThermal(Dataset):
         R_range, 
         feature_vector_name: str = 'feature_vector', 
         device = 'cpu', 
-        dtype = torch.float32, 
+        dtype = torch.float64, 
         feature_idx = None
     ):
         """
@@ -69,8 +69,8 @@ class Dataset3DThermal(Dataset):
             feature_dim = features.shape[1] + 2  # +2 for R and 1/R columns
             
             # Pre-allocate arrays
-            all_features = np.empty((num_samples * len(self.R_range), feature_dim), dtype=np.float32)
-            all_kappa = np.empty((num_samples * len(self.R_range), 6), dtype=np.float32)
+            all_features = np.empty((num_samples * len(self.R_range), feature_dim), dtype=np.float64)
+            all_kappa = np.empty((num_samples * len(self.R_range), 6), dtype=np.float64)
             
             # Fill arrays
             for i, R in enumerate(self.R_range):
@@ -87,7 +87,7 @@ class Dataset3DThermal(Dataset):
                     R_key = int(round(R))
                     kappa = f[f"{self.group}/effective_conductivity/contrast_R_{R_key}"][...]
                 else:
-                    kappa = np.ones((num_samples, 6), dtype=np.float32)
+                    kappa = np.ones((num_samples, 6), dtype=np.float64)
                     kappa[:, 3:] = 0
                     
                 all_kappa[idx] = kappa
@@ -113,7 +113,7 @@ class Dataset3DMechanical(Dataset):
                  feature_vector_name='feature_vector', 
                  random_seed=42,
                  device='cpu',
-                 dtype=torch.float32,
+                 dtype=torch.float64,
                  feature_idx=None):
         """
         A PyTorch Dataset for 3D mechanical microstructure homogenization data.
@@ -200,8 +200,8 @@ class Dataset3DMechanical(Dataset):
 
             n_samples = len(self.sampled_entries)
             n_features = feature_vectors.shape[1] + 6  # original features + 6 additional
-            features_np = np.empty((n_samples, n_features), dtype=np.float32)
-            tangents_np = np.empty((n_samples, 6, 6), dtype=np.float32)
+            features_np = np.empty((n_samples, n_features), dtype=np.float64)
+            tangents_np = np.empty((n_samples, 6, 6), dtype=np.float64)
 
             for idx, entry in enumerate(self.sampled_entries):
                 i = entry['dataset_index']
@@ -293,22 +293,22 @@ def C21_to_C6x6(C_21: torch.Tensor) -> torch.Tensor:
 
     return C_6x6
 
-def Piso1() -> torch.Tensor:
+def Piso1(dtype=torch.float64) -> torch.Tensor:
     """Returns the first isotropic projector in Mandel notation."""
-    P = torch.zeros((6, 6), dtype=torch.float32)
+    P = torch.zeros((6, 6), dtype=dtype)
     P[:3, :3] = 1. / 3.
     return P
 
-def Piso2() -> torch.Tensor:
+def Piso2(dtype=torch.float64) -> torch.Tensor:
     """Returns the second isotropic projector in Mandel notation."""
-    P = torch.eye(6, dtype=torch.float32)
-    P = P - Piso1()
+    P = torch.eye(6, dtype=dtype)
+    P = P - Piso1(dtype=dtype)
     return P
 
 def Ciso(K: torch.Tensor, G: torch.Tensor) -> torch.Tensor:
     """Returns an isotropic stiffness tensor in Mandel notation."""
-    P1 = Piso1().to(K.device)
-    I6 = torch.eye(6, dtype=torch.float32).to(K.device)
+    P1 = Piso1(dtype=K.dtype).to(K.device)
+    I6 = torch.eye(6, dtype=K.dtype).to(K.device)
     
     if K.ndimension() == 1 and G.ndimension() == 1:
         return (3. * K - 2. * G)[:, None, None] * P1[None, :, :] + 2. * G[:, None, None] * I6[None, :, :]

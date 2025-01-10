@@ -11,7 +11,7 @@ def get_data(data_loader, device='cpu', dtype=None):
     :rtype: [type]
     """
     if dtype is None:
-        dtype = torch.float32
+        dtype = torch.float64
 
     x_list, y_list = [], []
     for x_batch, y_batch in list(data_loader):
