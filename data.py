@@ -150,14 +150,14 @@ class Dataset3DMechanical(Dataset):
         The final feature vector is formed by:
         [selected_original_features, 1/alpha, 1/beta, 1/gamma, alpha, beta, gamma]
 
-        The homogenized tangent is a 6x6 symmetric matrix. We extract its upper triangle 
+        The homogenized tangent is a 6x6 symmetric matrix. We extract its lower triangle 
         in the order:
         (0,0), (1,1), (2,2), (3,3), (4,4), (5,5),
-        (0,1), (0,2), (0,3), (0,4), (0,5),
-        (1,2), (1,3), (1,4), (1,5),
-        (2,3), (2,4), (2,5),
-        (3,4), (3,5),
-        (4,5)
+        (1,0),
+        (2,0), (2,1),
+        (3,0), (3,1), (3,2),
+        (4,0), (4,1), (4,2), (4,3),
+        (5,0), (5,1), (5,2), (5,3), (5,4)
         
         Args:
             csv_file_path (str): Path to the CSV file with metadata.
@@ -251,7 +251,7 @@ class Dataset3DMechanical(Dataset):
         # Convert to torch tensors
         self.all_features = torch.from_numpy(features_np).to(dtype=self.dtype, device=self.device)
         C_all_6x6 = torch.from_numpy(tangents_np).to(dtype=self.dtype, device=self.device)
-        self.all_C = C6x6_to_C21(C_all_6x6)
+        self.all_C = pack_sym(C_all_6x6, dim=6)
 
     def __len__(self):
         return self.num_samples
@@ -275,53 +275,6 @@ class Dataset3DMechanical(Dataset):
 
 
 
-def C6x6_to_C21(C_6x6: torch.Tensor) -> torch.Tensor:
-    """
-    Convert a batch of 6x6 symmetric matrices to their 21-element upper-triangular representation.
-    
-    Args:
-        C_6x6 (torch.Tensor): Shape (N, 6, 6), symmetric matrices.
-
-    Returns:
-        torch.Tensor: Shape (N, 21), flattened upper-triangular elements.
-    """
-    indices = torch.tensor([
-        [0, 0], [1, 1], [2, 2], [3, 3], [4, 4], [5, 5],
-        [0, 1], [0, 2], [0, 3], [0, 4], [0, 5],
-        [1, 2], [1, 3], [1, 4], [1, 5],
-        [2, 3], [2, 4], [2, 5],
-        [3, 4], [3, 5],
-        [4, 5]
-    ], dtype=torch.long)
-    
-    return C_6x6[:, indices[:, 0], indices[:, 1]]  # (N, 21)
-
-def C21_to_C6x6(C_21: torch.Tensor) -> torch.Tensor:
-    """
-    Convert a batch of 21-element vectors to their full 6x6 symmetric matrix form.
-    
-    Args:
-        C_21 (torch.Tensor): Shape (N, 21), upper-triangular elements.
-
-    Returns:
-        torch.Tensor: Shape (N, 6, 6) symmetric matrices.
-    """
-    indices = torch.tensor([
-        [0, 0], [1, 1], [2, 2], [3, 3], [4, 4], [5, 5],
-        [0, 1], [0, 2], [0, 3], [0, 4], [0, 5],
-        [1, 2], [1, 3], [1, 4], [1, 5],
-        [2, 3], [2, 4], [2, 5],
-        [3, 4], [3, 5],
-        [4, 5]
-    ], dtype=torch.long)
-    
-    N = C_21.shape[0]
-    C_6x6 = torch.zeros((N, 6, 6), dtype=C_21.dtype, device=C_21.device)
-    C_6x6[:, indices[:, 0], indices[:, 1]] = C_21
-    C_6x6[:, indices[:, 1], indices[:, 0]] = C_21
-
-    return C_6x6
-
 def Piso1(dtype=torch.float64) -> torch.Tensor:
     """Returns the first isotropic projector in Mandel notation."""
     P = torch.zeros((6, 6), dtype=dtype)
@@ -343,3 +296,30 @@ def Ciso(K: torch.Tensor, G: torch.Tensor) -> torch.Tensor:
         return (3. * K - 2. * G)[:, None, None] * P1[None, :, :] + 2. * G[:, None, None] * I6[None, :, :]
     else:
         return (3. * K - 2. * G) * P1 + 2. * G * I6
+
+
+
+# Functions for converting between symmetric matrix representations
+
+def get_sym_indices(dim):
+    diag_idx = (torch.arange(dim), torch.arange(dim))    
+    row, col = torch.tril_indices(dim, dim, -1)
+    dof_idx = (torch.cat([diag_idx[0], row]), torch.cat([diag_idx[1], col]))
+    return dof_idx
+
+def pack_sym(symmetric_matrix, dim, dof_idx=None):
+    if dof_idx is None:
+        dof_idx = get_sym_indices(dim)
+    dof_idx = tuple(idx.to(symmetric_matrix.device) for idx in dof_idx)
+    return symmetric_matrix[(..., *dof_idx) if symmetric_matrix.dim() == 3 else dof_idx]
+
+def unpack_sym(packed_values, dim, dof_idx=None):
+    if dof_idx is None:
+        dof_idx = get_sym_indices(dim)
+    dof_idx = tuple(idx.to(packed_values.device) for idx in dof_idx)
+    matrix = torch.zeros((*packed_values.shape[:-1], dim, dim), dtype=packed_values.dtype, device=packed_values.device)
+    if packed_values.dim() == 2:
+        matrix[:, dof_idx[0], dof_idx[1]] = packed_values
+        return matrix + matrix.transpose(1, 2) - torch.diag_embed(torch.diagonal(matrix, dim1=1, dim2=2))
+    matrix[dof_idx] = packed_values
+    return matrix + matrix.T - torch.diag(torch.diag(matrix))
